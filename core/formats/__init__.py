@@ -1,0 +1,1 @@
+"""Tournament format plugins package."""

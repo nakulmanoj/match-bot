@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: match-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database file across container restarts/rebuilds
+      - ./data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/tournament.db
