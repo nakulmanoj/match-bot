@@ -6,10 +6,12 @@ import logging
 import os
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
 from core.database import Database
+from utils import embeds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,6 +50,26 @@ class TournamentBot(commands.Bot):
         # Global sync
         log.info("Syncing slash commands globally...")
         synced = await self.tree.sync()
+
+        # Register global slash command error handler
+        async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+            if isinstance(error, app_commands.CheckFailure):
+                msg = str(error) or "You do not have tournament admin permissions."
+                embed = embeds.error_embed(msg)
+            else:
+                log.error(f"Command error: {error}", exc_info=error)
+                embed = embeds.error_embed(f"An unexpected error occurred: {error}")
+
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
+            except Exception as e:
+                log.error(f"Failed to send error response: {e}")
+
+        self.tree.on_error = on_tree_error
+
         # Start lightweight HTTP server for Hugging Face Spaces / Uptime monitoring
         port = int(os.getenv("PORT", 7860))
         await self._start_web_server(port)

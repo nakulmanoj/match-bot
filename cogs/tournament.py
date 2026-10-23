@@ -39,7 +39,7 @@ class TournamentCog(commands.Cog):
         Validates that no active tournament exists, num_teams is a power of 2,
         and team_size is at least 1. Creates team slots automatically.
         """
-        guild_id = interaction.guild_id
+        guild_id = str(interaction.guild_id)
 
         # Check for existing active tournament
         existing = await self.bot.db.get_active_tournament(guild_id)
@@ -114,7 +114,7 @@ class TournamentCog(commands.Cog):
 
         Generates the first round bracket based on team seedings.
         """
-        guild_id = interaction.guild_id
+        guild_id = str(interaction.guild_id)
 
         tournament = await self.bot.db.get_active_tournament(guild_id)
         if not tournament:
@@ -216,7 +216,7 @@ class TournamentCog(commands.Cog):
     )
     async def tournament_info(self, interaction: discord.Interaction) -> None:
         """Display current tournament information for this guild."""
-        guild_id = interaction.guild_id
+        guild_id = str(interaction.guild_id)
 
         tournament = await self.bot.db.get_active_tournament(guild_id)
         if not tournament:
@@ -261,7 +261,7 @@ class TournamentCog(commands.Cog):
     @is_admin()
     async def cancel_tournament(self, interaction: discord.Interaction) -> None:
         """Cancel and delete the currently active tournament for this server."""
-        guild_id = interaction.guild_id
+        guild_id = str(interaction.guild_id)
 
         tournament = await self.bot.db.get_active_tournament(guild_id)
         if not tournament:

@@ -21,9 +21,15 @@ def is_admin():
         if not interaction.guild:
             raise app_commands.CheckFailure("This command can only be used in a server.")
 
-        member = interaction.guild.get_member(interaction.user.id)
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if member is None and interaction.guild:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except Exception:
+                pass
+
         if member is None:
-            raise app_commands.CheckFailure("Could not resolve your membership.")
+            raise app_commands.CheckFailure("Could not resolve your membership in this server.")
 
         # Server owner is always admin
         if interaction.guild.owner_id == interaction.user.id:
