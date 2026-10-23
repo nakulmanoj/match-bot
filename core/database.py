@@ -168,13 +168,15 @@ class Database:
             row = await cursor.fetchone()
             return Tournament.from_row(row) if row else None
 
-    async def get_active_tournament(self, guild_id: str) -> Optional[Tournament]:
+    async def get_active_tournament(self, guild_id: str | int) -> Optional[Tournament]:
         """Get the active (non-completed) tournament for a guild."""
+        g_str = str(guild_id)
+        g_int = int(guild_id) if str(guild_id).isdigit() else None
         async with self.conn.execute(
             """SELECT * FROM tournaments
-               WHERE guild_id = ? AND status != ?
+               WHERE (guild_id = ? OR (? IS NOT NULL AND guild_id = ?)) AND status != ?
                ORDER BY created_at DESC LIMIT 1""",
-            (guild_id, TournamentStatus.COMPLETED.value),
+            (g_str, g_int, g_int, TournamentStatus.COMPLETED.value),
         ) as cursor:
             row = await cursor.fetchone()
             return Tournament.from_row(row) if row else None

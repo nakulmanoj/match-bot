@@ -111,54 +111,88 @@ class ResultsCog(commands.Cog):
         if message.author.bot or message.guild is None:
             return
 
-        # Must have at least 2 mentions (can be 2, 3, 4, etc. across the two teams)
-        # and at least 1 image attachment
-        if len(message.mentions) < 2:
+        has_mentions = len(message.mentions) >= 2
+        has_images = any(self._is_image_attachment(a) for a in message.attachments)
+        has_vs = self._has_vs_between_mentions(message.content)
+
+        # Log any message that looks like an attempt at match submission
+        if has_mentions and (has_images or has_vs):
+            logger.info(
+                f"[Results] Message from {message.author} in '{message.guild.name}' (#{message.channel}): "
+                f"content='{message.content}', mentions={len(message.mentions)}, "
+                f"attachments={len(message.attachments)}, has_vs={has_vs}, has_images={has_images}"
+            )
+
+        if not has_mentions or not has_images or not has_vs:
             return
 
         image_attachments = [
             a for a in message.attachments if self._is_image_attachment(a)
         ]
-        if not image_attachments:
-            return
 
-        # Must contain 'vs' between mentions
-        if not self._has_vs_between_mentions(message.content):
-            return
-
-        guild_id = message.guild.id
+        guild_id = str(message.guild.id)
 
         # Get active tournament
         tournament = await self.bot.db.get_active_tournament(guild_id)
         if not tournament:
+            await message.reply(
+                embed=embeds.error_embed(
+                    "No active tournament found in this server. Use `/create_tournament` to create one."
+                )
+            )
+            return
+
+        if tournament.status == TournamentStatus.SETUP:
+            await message.reply(
+                embed=embeds.error_embed(
+                    "The tournament is still in **Setup** phase.\n"
+                    "All teams must be filled and an admin must run `/start_tournament` before submitting match scores."
+                )
+            )
             return
 
         if tournament.status != TournamentStatus.IN_PROGRESS:
+            await message.reply(
+                embed=embeds.error_embed(
+                    f"Tournament is currently in **{tournament.status.value}** status and not accepting match results."
+                )
+            )
             return
 
         # Resolve mentioned players and determine the two distinct competing teams
         team_players_map: dict[int, list[discord.Member]] = {}
+        unregistered: list[str] = []
         for member in message.mentions:
             p = await self.bot.db.get_player_by_discord_id(tournament.id, str(member.id))
             if p:
                 team_players_map.setdefault(p.team_id, []).append(member)
+            else:
+                unregistered.append(member.mention)
+
+        if unregistered:
+            await message.reply(
+                embed=embeds.error_embed(
+                    f"The following player(s) are not registered in the active tournament: {', '.join(unregistered)}\n"
+                    f"Use `/add_member` to register them first."
+                )
+            )
+            return
 
         # Must map to exactly 2 distinct teams
         distinct_team_ids = list(team_players_map.keys())
         if len(distinct_team_ids) != 2:
-            # Check if user mentioned 2 players where one was not found
-            if len(message.mentions) == 2 and len(distinct_team_ids) < 2:
-                unregistered = [
-                    m.mention
-                    for m in message.mentions
-                    if not await self.bot.db.get_player_by_discord_id(tournament.id, str(m.id))
-                ]
-                if unregistered:
-                    await message.reply(
-                        embed=embeds.error_embed(
-                            f"{', '.join(unregistered)} is not registered in the tournament."
-                        )
+            if len(distinct_team_ids) == 1:
+                await message.reply(
+                    embed=embeds.error_embed(
+                        "All mentioned players belong to the **same team**! Mention players from the two competing teams."
                     )
+                )
+            else:
+                await message.reply(
+                    embed=embeds.error_embed(
+                        f"Mentions span across **{len(distinct_team_ids)}** teams. Match submissions must be between exactly **2** competing teams."
+                    )
+                )
             return
 
         team_a_id, team_b_id = distinct_team_ids[0], distinct_team_ids[1]
