@@ -111,19 +111,34 @@ class ResultsCog(commands.Cog):
         if message.author.bot or message.guild is None:
             return
 
-        has_mentions = len(message.mentions) >= 2
         has_images = any(self._is_image_attachment(a) for a in message.attachments)
         has_vs = self._has_vs_between_mentions(message.content)
 
-        # Log any message that looks like an attempt at match submission
-        if has_mentions and (has_images or has_vs):
+        # Log any message with images or "vs"
+        if has_images or has_vs:
             logger.info(
-                f"[Results] Message from {message.author} in '{message.guild.name}' (#{message.channel}): "
-                f"content='{message.content}', mentions={len(message.mentions)}, "
-                f"attachments={len(message.attachments)}, has_vs={has_vs}, has_images={has_images}"
+                f"[Results] Message in '{message.guild.name}' (#{message.channel}) from {message.author}: "
+                f"content='{message.content}', mentions={[m.name for m in message.mentions]}, "
+                f"roles={[r.name for r in message.role_mentions]}, attachments={len(message.attachments)}"
             )
 
-        if not has_mentions or not has_images or not has_vs:
+        # Only process if message contains "vs" AND image attachments
+        if not has_vs or not has_images:
+            return
+
+        # Resolve mentions: support @P1 vs @P2, or just @Opponent (with author as P1)
+        mentions_list = list(message.mentions)
+        if len(mentions_list) == 1 and message.author not in mentions_list:
+            mentions_list.append(message.author)
+
+        if len(mentions_list) < 2:
+            await message.reply(
+                embed=embeds.error_embed(
+                    "To submit match results, please mention both competing players:\n"
+                    "Example: `@Player1 vs @Player2`\n"
+                    "*(Make sure to mention actual users, not roles!)*"
+                )
+            )
             return
 
         image_attachments = [
@@ -162,7 +177,7 @@ class ResultsCog(commands.Cog):
         # Resolve mentioned players and determine the two distinct competing teams
         team_players_map: dict[int, list[discord.Member]] = {}
         unregistered: list[str] = []
-        for member in message.mentions:
+        for member in mentions_list:
             p = await self.bot.db.get_player_by_discord_id(tournament.id, str(member.id))
             if p:
                 team_players_map.setdefault(p.team_id, []).append(member)
