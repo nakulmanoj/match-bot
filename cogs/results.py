@@ -1,17 +1,17 @@
-"""Result submission cog — listens for match result messages with screenshots.
+"""Result submission cog — listens for match result messages with screenshots or slash commands.
 
-Expects messages containing two @mentions separated by 'vs' and exactly two
-image attachments (leg 1 and leg 2 screenshots). Performs OCR extraction,
-matches players, and records scores.
+Accepts match result screenshots (2, 4, 6, 8+), runs OCR extraction, matches
+players to their registered FC Mobile IGNs, and records aggregate scores.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from core.models import TournamentStatus, TournamentFormat, MatchStatus, RoundStatus
@@ -25,7 +25,7 @@ REJECT_EMOJI = "❌"
 
 
 class ResultsCog(commands.Cog):
-    """Cog that processes match results from messages with screenshots."""
+    """Cog that processes match results from messages or slash commands."""
 
     def __init__(self, bot: "TournamentBot") -> None:
         self.bot = bot
@@ -36,39 +36,16 @@ class ResultsCog(commands.Cog):
 
     @staticmethod
     def _is_image_attachment(attachment: discord.Attachment) -> bool:
-        """Check whether an attachment is an image based on content type."""
-        return (
-            attachment.content_type is not None
-            and attachment.content_type.startswith("image/")
-        )
+        """Check whether an attachment is an image based on content type or filename."""
+        if attachment.content_type and attachment.content_type.startswith("image/"):
+            return True
+        filename = (attachment.filename or "").lower()
+        return filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"))
 
     @staticmethod
     def _has_vs_between_mentions(content: str) -> bool:
         """Return True if the message text contains 'vs' (case-insensitive)."""
         return "vs" in content.lower()
-
-    def _determine_scores(
-        self,
-        ocr_result: dict,
-        left_player_team_id: int,
-        home_team_id: int,
-    ) -> tuple[int, int]:
-        """Map OCR left/right scores to home/away based on team membership.
-
-        Args:
-            ocr_result: Dict with ``left_score`` and ``right_score`` keys.
-            left_player_team_id: The team ID of the player on the left side.
-            home_team_id: The team ID designated as the home team.
-
-        Returns:
-            A ``(home_score, away_score)`` tuple.
-        """
-        left_score: int = ocr_result["left_score"]
-        right_score: int = ocr_result["right_score"]
-
-        if left_player_team_id == home_team_id:
-            return left_score, right_score
-        return right_score, left_score
 
     @staticmethod
     def _determine_winner(
@@ -79,78 +56,46 @@ class ResultsCog(commands.Cog):
         home_team_id: int,
         away_team_id: int,
     ) -> Optional[int]:
-        """Determine the winner by aggregate, falling back to away-goals rule.
-
-        Returns:
-            The winning team's ID, or ``None`` if the tie cannot be broken.
-        """
+        """Determine the winner by aggregate, falling back to away-goals rule."""
         if home_agg > away_agg:
             return home_team_id
         if away_agg > home_agg:
             return away_team_id
 
         # Tied on aggregate — apply away-goals rule.
-        # home_away_goals = goals scored by the home team in the away leg
-        # away_home_goals = goals scored by the away team in the home leg
         if away_home_goals > home_away_goals:
             return away_team_id
         if home_away_goals > away_home_goals:
             return home_team_id
 
-        # Still level — cannot decide automatically
         return None
 
     # ------------------------------------------------------------------
-    # Listener
+    # Core Submission Processor
     # ------------------------------------------------------------------
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        """Process incoming messages that look like result submissions."""
-        # Ignore bots and DMs
-        if message.author.bot or message.guild is None:
-            return
-
-        has_images = any(self._is_image_attachment(a) for a in message.attachments)
-        has_vs = self._has_vs_between_mentions(message.content)
-
-        # Log any message with images or "vs"
-        if has_images or has_vs:
-            logger.info(
-                f"[Results] Message in '{message.guild.name}' (#{message.channel}) from {message.author}: "
-                f"content='{message.content}', mentions={[m.name for m in message.mentions]}, "
-                f"roles={[r.name for r in message.role_mentions]}, attachments={len(message.attachments)}"
-            )
-
-        # Only process if message contains "vs" AND image attachments
-        if not has_vs or not has_images:
-            return
-
-        # Resolve mentions: support @P1 vs @P2, or just @Opponent (with author as P1)
-        mentions_list = list(message.mentions)
-        if len(mentions_list) == 1 and message.author not in mentions_list:
-            mentions_list.append(message.author)
-
-        if len(mentions_list) < 2:
-            await message.reply(
-                embed=embeds.error_embed(
-                    "To submit match results, please mention both competing players:\n"
-                    "Example: `@Player1 vs @Player2`\n"
-                    "*(Make sure to mention actual users, not roles!)*"
-                )
+    async def _handle_submission(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.Messageable,
+        author: discord.User | discord.Member,
+        players: list[discord.Member],
+        image_attachments: list[discord.Attachment],
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> None:
+        """Process a match result submission from either a chat message or slash command."""
+        if not image_attachments:
+            await send_reply(
+                embed=embeds.error_embed("Please attach at least one match result screenshot.")
             )
             return
 
-        image_attachments = [
-            a for a in message.attachments if self._is_image_attachment(a)
-        ]
-
-        guild_id = str(message.guild.id)
+        guild_id = str(guild.id)
 
         # Get active tournament
         tournament = await self.bot.db.get_active_tournament(guild_id)
         if not tournament:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     "No active tournament found in this server. Use `/create_tournament` to create one."
                 )
@@ -158,7 +103,7 @@ class ResultsCog(commands.Cog):
             return
 
         if tournament.status == TournamentStatus.SETUP:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     "The tournament is still in **Setup** phase.\n"
                     "All teams must be filled and an admin must run `/start_tournament` before submitting match scores."
@@ -167,7 +112,7 @@ class ResultsCog(commands.Cog):
             return
 
         if tournament.status != TournamentStatus.IN_PROGRESS:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     f"Tournament is currently in **{tournament.status.value}** status and not accepting match results."
                 )
@@ -177,7 +122,7 @@ class ResultsCog(commands.Cog):
         # Resolve mentioned players and determine the two distinct competing teams
         team_players_map: dict[int, list[discord.Member]] = {}
         unregistered: list[str] = []
-        for member in mentions_list:
+        for member in players:
             p = await self.bot.db.get_player_by_discord_id(tournament.id, str(member.id))
             if p:
                 team_players_map.setdefault(p.team_id, []).append(member)
@@ -185,7 +130,7 @@ class ResultsCog(commands.Cog):
                 unregistered.append(member.mention)
 
         if unregistered:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     f"The following player(s) are not registered in the active tournament: {', '.join(unregistered)}\n"
                     f"Use `/add_member` to register them first."
@@ -197,13 +142,13 @@ class ResultsCog(commands.Cog):
         distinct_team_ids = list(team_players_map.keys())
         if len(distinct_team_ids) != 2:
             if len(distinct_team_ids) == 1:
-                await message.reply(
+                await send_reply(
                     embed=embeds.error_embed(
                         "All mentioned players belong to the **same team**! Mention players from the two competing teams."
                     )
                 )
             else:
-                await message.reply(
+                await send_reply(
                     embed=embeds.error_embed(
                         f"Mentions span across **{len(distinct_team_ids)}** teams. Match submissions must be between exactly **2** competing teams."
                     )
@@ -217,15 +162,16 @@ class ResultsCog(commands.Cog):
             tournament.id, team_a_id, team_b_id
         )
         if not match:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
-                    "No scheduled match found between these two teams."
+                    "No scheduled match found between these two teams in the current round. "
+                    "Use `/view_bracket` to check current fixtures."
                 )
             )
             return
 
         if match.status == MatchStatus.COMPLETED:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     "This match has already been completed. Use `/update_result` to modify."
                 )
@@ -239,7 +185,7 @@ class ResultsCog(commands.Cog):
                 data = await att.read()
                 attachments_bytes.append(data)
         except discord.HTTPException:
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed("Failed to download one or more screenshot attachments.")
             )
             return
@@ -253,16 +199,14 @@ class ResultsCog(commands.Cog):
 
         ocr_results = []
         try:
-            async with message.channel.typing():
-                for att_bytes in attachments_bytes:
-                    res = await extractor.extract(att_bytes)
-                    ocr_results.append(res)
+            for att_bytes in attachments_bytes:
+                res = await extractor.extract(att_bytes)
+                ocr_results.append(res)
         except Exception:
             logger.exception("OCR extraction failed for match %s", match.id)
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
-                    "OCR extraction failed. Please use `/manual_result` to enter "
-                    "scores manually."
+                    "OCR extraction failed. Please use `/manual_result` to enter scores manually."
                 )
             )
             return
@@ -271,7 +215,7 @@ class ResultsCog(commands.Cog):
         failed_indices = [i + 1 for i, res in enumerate(ocr_results) if res is None]
         if failed_indices:
             legs_str = ", ".join(f"Screenshot #{i}" for i in failed_indices)
-            await message.reply(
+            await send_reply(
                 embed=embeds.error_embed(
                     f"Could not extract scores from {legs_str}. "
                     "Please use `/manual_result` or re-upload clearer screenshots."
@@ -293,7 +237,7 @@ class ResultsCog(commands.Cog):
                 all_match_scores.extend([h_score, a_score])
             except Exception:
                 logger.exception("Player matching failed for match %s leg %d", match.id, i + 1)
-                await message.reply(
+                await send_reply(
                     embed=embeds.error_embed(
                         "Failed to match OCR names to registered players. "
                         "Please use `/manual_result` instead."
@@ -328,15 +272,18 @@ class ResultsCog(commands.Cog):
                 f"React {CONFIRM_EMOJI} to accept or {REJECT_EMOJI} to reject."
             )
 
-            preview_msg = await message.reply(embed=preview_embed)
-            await preview_msg.add_reaction(CONFIRM_EMOJI)
-            await preview_msg.add_reaction(REJECT_EMOJI)
+            preview_msg = await send_reply(embed=preview_embed)
+            try:
+                await preview_msg.add_reaction(CONFIRM_EMOJI)
+                await preview_msg.add_reaction(REJECT_EMOJI)
+            except Exception:
+                pass
 
             def reaction_check(
                 reaction: discord.Reaction, user: discord.User
             ) -> bool:
                 return (
-                    user.id == message.author.id
+                    user.id == author.id
                     and reaction.message.id == preview_msg.id
                     and str(reaction.emoji) in (CONFIRM_EMOJI, REJECT_EMOJI)
                 )
@@ -361,8 +308,7 @@ class ResultsCog(commands.Cog):
                 )
                 return
 
-        # Determine home/away scores for each screenshot:
-        # If OCR left name matches a home team player better, left_score is home_score
+        # Determine home/away scores for each screenshot
         from rapidfuzz import fuzz
         from ocr.matcher import _normalize_name
 
@@ -409,17 +355,17 @@ class ResultsCog(commands.Cog):
         all_teams = await self.bot.db.get_teams(tournament.id)
         teams_dict = {t.id: t for t in all_teams}
 
-        home_players = await self.bot.db.get_players_by_team(match.home_team_id)
-        away_players = await self.bot.db.get_players_by_team(match.away_team_id)
+        home_players_db = await self.bot.db.get_players_by_team(match.home_team_id)
+        away_players_db = await self.bot.db.get_players_by_team(match.away_team_id)
 
-        def _get_display(team_id: int, players: list) -> str:
-            if players:
-                return ", ".join(f"<@{p.discord_id}>" for p in players)
+        def _get_display(team_id: int, players_list: list) -> str:
+            if players_list:
+                return ", ".join(f"<@{p.discord_id}>" for p in players_list)
             t = teams_dict.get(team_id)
             return t.name if t else "TBD"
 
-        home_display = _get_display(match.home_team_id, home_players)
-        away_display = _get_display(match.away_team_id, away_players)
+        home_display = _get_display(match.home_team_id, home_players_db)
+        away_display = _get_display(match.away_team_id, away_players_db)
 
         if winner_team_id is not None:
             await self.bot.db.set_match_winner(match.id, winner_team_id)
@@ -452,9 +398,9 @@ class ResultsCog(commands.Cog):
                 name="Winner", value=f"🏅 **{winner_display}**", inline=True
             )
 
-            await message.reply(embed=result_embed)
+            await send_reply(embed=result_embed)
         else:
-            # Draw — cannot break tie automatically
+            # Draw
             await self.bot.db.update_match_status(match.id, MatchStatus.COMPLETED)
 
             result_embed = discord.Embed(
@@ -471,7 +417,115 @@ class ResultsCog(commands.Cog):
                     value=f"{home_display} **{h_s}** - **{a_s}** {away_display}",
                     inline=False,
                 )
-            await message.reply(embed=result_embed)
+            await send_reply(embed=result_embed)
+
+    # ------------------------------------------------------------------
+    # Message Listener (@Player1 vs @Player2 + images)
+    # ------------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Process incoming messages that look like result submissions."""
+        if message.author.bot or message.guild is None:
+            return
+
+        has_images = any(self._is_image_attachment(a) for a in message.attachments)
+        has_vs = self._has_vs_between_mentions(message.content)
+
+        if has_images or has_vs:
+            logger.info(
+                f"[Results] Message in '{message.guild.name}' (#{message.channel}) from {message.author}: "
+                f"content='{message.content}', mentions={[m.name for m in message.mentions]}, "
+                f"roles={[r.name for r in message.role_mentions]}, attachments={len(message.attachments)}"
+            )
+
+        if not has_vs or not has_images:
+            return
+
+        # Resolve mentions: support user mentions, role mentions, or single opponent tag
+        mentions_list: list[discord.Member] = list(message.mentions)
+        for role in message.role_mentions:
+            for member in role.members:
+                if member not in mentions_list:
+                    mentions_list.append(member)
+
+        if len(mentions_list) == 1 and message.author not in mentions_list:
+            mentions_list.append(message.author)
+
+        if len(mentions_list) < 2:
+            await message.reply(
+                embed=embeds.error_embed(
+                    "To submit match results, please mention both competing players:\n"
+                    "Example: `@Player1 vs @Player2`\n"
+                    "*(Make sure to mention actual users, not roles!)*"
+                )
+            )
+            return
+
+        image_attachments = [
+            a for a in message.attachments if self._is_image_attachment(a)
+        ]
+
+        await self._handle_submission(
+            guild=message.guild,
+            channel=message.channel,
+            author=message.author,
+            players=mentions_list,
+            image_attachments=image_attachments,
+            send_reply=message.reply,
+        )
+
+    # ------------------------------------------------------------------
+    # Slash Command: /submit_result
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="submit_result",
+        description="Submit match screenshots for automatic OCR score calculation.",
+    )
+    @app_commands.describe(
+        opponent="The opponent player from the other team",
+        screenshot1="Screenshot of match 1",
+        screenshot2="Screenshot of match 2",
+        screenshot3="Screenshot of match 3 (optional)",
+        screenshot4="Screenshot of match 4 (optional)",
+    )
+    async def submit_result(
+        self,
+        interaction: discord.Interaction,
+        opponent: discord.Member,
+        screenshot1: discord.Attachment,
+        screenshot2: Optional[discord.Attachment] = None,
+        screenshot3: Optional[discord.Attachment] = None,
+        screenshot4: Optional[discord.Attachment] = None,
+    ) -> None:
+        """Slash command alternative to submit match results."""
+        if not interaction.guild:
+            await interaction.response.send_message(
+                embed=embeds.error_embed("This command can only be used in a server."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        attachments = [att for att in [screenshot1, screenshot2, screenshot3, screenshot4] if att is not None]
+
+        author_member = (
+            interaction.user if isinstance(interaction.user, discord.Member)
+            else interaction.guild.get_member(interaction.user.id)
+        )
+        if not author_member:
+            author_member = interaction.user
+
+        await self._handle_submission(
+            guild=interaction.guild,
+            channel=interaction.channel,
+            author=author_member,
+            players=[author_member, opponent],
+            image_attachments=attachments,
+            send_reply=interaction.followup.send,
+        )
 
 
 async def setup(bot: "TournamentBot") -> None:
