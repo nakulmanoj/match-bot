@@ -94,7 +94,7 @@ def render_bracket_image(
         color=GOLD,
         ha="left",
         va="center",
-        family="Segoe UI",
+        family="sans-serif",
     )
 
     # Calculate match card centers per round
@@ -168,7 +168,7 @@ def render_bracket_image(
             color=ACCENT_BLUE,
             ha="center",
             va="center",
-            family="Segoe UI",
+            family="sans-serif",
         )
 
         for m_idx, match in enumerate(matches):
@@ -220,7 +220,7 @@ def render_bracket_image(
                 color=TEXT_MUTED,
                 ha="left",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
 
             status_str = "FINISHED" if is_completed else "PENDING"
@@ -234,7 +234,7 @@ def render_bracket_image(
                 color=status_col,
                 ha="right",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
 
             # Home team row
@@ -253,7 +253,7 @@ def render_bracket_image(
                 color=home_color,
                 ha="left",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
             ax.text(
                 card_x + card_width - 14,
@@ -264,7 +264,7 @@ def render_bracket_image(
                 color=home_color,
                 ha="right",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
 
             # Divider inside card
@@ -292,7 +292,7 @@ def render_bracket_image(
                 color=away_color,
                 ha="left",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
             ax.text(
                 card_x + card_width - 14,
@@ -303,7 +303,7 @@ def render_bracket_image(
                 color=away_color,
                 ha="right",
                 va="center",
-                family="Segoe UI",
+                family="sans-serif",
             )
 
     buf = io.BytesIO()
