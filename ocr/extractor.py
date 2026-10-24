@@ -6,6 +6,7 @@ to extract player names and scores.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import logging
@@ -45,8 +46,21 @@ class OCRExtractor:
     def __init__(self, languages: list[str] | None = None) -> None:
         if languages is None:
             languages = ["en"]
-        log.info("Initialising EasyOCR reader (languages=%s, gpu=False)", languages)
-        self.reader: easyocr.Reader = easyocr.Reader(languages, gpu=False, verbose=False)
+        self.languages = languages
+        self.reader: Optional[easyocr.Reader] = None  # initialized lazily via _ensure_reader()
+
+    def _init_reader_sync(self) -> None:
+        """Synchronously initialize the EasyOCR reader (run in executor)."""
+        if self.reader is None:
+            log.info("Initialising EasyOCR reader (languages=%s, gpu=False)", self.languages)
+            self.reader = easyocr.Reader(self.languages, gpu=False, verbose=False)
+            log.info("EasyOCR reader ready.")
+
+    async def _ensure_reader(self) -> None:
+        """Ensure the EasyOCR reader is initialized without blocking the event loop."""
+        if self.reader is None:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._init_reader_sync)
 
     def _crop_region(
         self,
@@ -72,7 +86,11 @@ class OCRExtractor:
 
         return image
 
-    def _extract_text(self, image: Image.Image) -> tuple[str, float]:
+    def _extract_text_sync(self, img_array: np.ndarray) -> list[tuple]:
+        """Run EasyOCR readtext synchronously (must be called in executor)."""
+        return self.reader.readtext(img_array)  # type: ignore[union-attr]
+
+    def _extract_text_from_image_sync(self, image: Image.Image) -> tuple[str, float]:
         """Run EasyOCR on *image* and return ONLY the topmost line (the player's username).
 
         FC Mobile banners place the player username on the topmost line,
@@ -81,7 +99,7 @@ class OCRExtractor:
         # Upscale 2x for optimal OCR fidelity on small mobile font sizes
         upscaled = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
         img_array: np.ndarray = np.array(upscaled)
-        results: list[tuple] = self.reader.readtext(img_array)
+        results: list[tuple] = self.reader.readtext(img_array)  # type: ignore[union-attr]
 
         if not results:
             return "", 0.0
@@ -176,6 +194,10 @@ class OCRExtractor:
 
     async def extract(self, image_bytes: bytes) -> Optional[OCRResult]:
         """Extract player names and score from a result screenshot."""
+        await self._ensure_reader()
+
+        loop = asyncio.get_event_loop()
+
         image = Image.open(io.BytesIO(image_bytes))
         w, h = image.size
         aspect_ratio = w / h  # ~1.44 for iPad, ~2.16 for phones
@@ -195,21 +217,29 @@ class OCRExtractor:
 
         # 1. Left Name Extraction (strictly topmost username line)
         c_left = self._crop_region(image, left_header_box)
-        left_text, left_conf = self._extract_text(c_left)
+        left_text, left_conf = await loop.run_in_executor(
+            None, self._extract_text_from_image_sync, c_left
+        )
 
         # 2. Right Name Extraction (strictly topmost username line)
         c_right = self._crop_region(image, right_header_box)
-        right_text, right_conf = self._extract_text(c_right)
+        right_text, right_conf = await loop.run_in_executor(
+            None, self._extract_text_from_image_sync, c_right
+        )
 
         # 3. Score Extraction
         c_score = self._crop_region(image, score_box)
-        res_score = self.reader.readtext(np.array(c_score))
+        res_score = await loop.run_in_executor(
+            None, self._extract_text_sync, np.array(c_score)
+        )
         parsed = self._parse_score_from_results(res_score)
 
         if parsed is None:
             # Try preprocessed score crop
             proc_score = self._preprocess(c_score, scale=2, contrast=2.0)
-            res_score_proc = self.reader.readtext(np.array(proc_score))
+            res_score_proc = await loop.run_in_executor(
+                None, self._extract_text_sync, np.array(proc_score)
+            )
             parsed = self._parse_score_from_results(res_score_proc)
 
         if parsed is None:

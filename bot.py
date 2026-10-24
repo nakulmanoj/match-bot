@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -73,6 +74,20 @@ class TournamentBot(commands.Bot):
         # Start lightweight HTTP server for Hugging Face Spaces / Uptime monitoring
         port = int(os.getenv("PORT", 7860))
         await self._start_web_server(port)
+
+        # Pre-warm EasyOCR in the background so commands don't block
+        asyncio.create_task(self._warmup_ocr())
+
+    async def _warmup_ocr(self) -> None:
+        """Pre-load OCR reader in background executor so first command doesn't wait."""
+        log.info("Pre-warming EasyOCR reader in background...")
+        try:
+            from ocr.extractor import get_extractor
+            extractor = get_extractor()
+            await extractor._ensure_reader()
+            log.info("EasyOCR reader pre-warmed successfully!")
+        except Exception as e:
+            log.warning(f"Could not pre-warm EasyOCR reader: {e}")
 
     async def _start_web_server(self, port: int) -> None:
         """Start a lightweight aiohttp health check server."""
