@@ -6,7 +6,6 @@ players to their registered FC Mobile IGNs, and records aggregate scores.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Optional, Callable, Awaitable, Any
 
@@ -14,14 +13,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core.models import TournamentStatus, TournamentFormat, MatchStatus, RoundStatus
+from core.models import TournamentStatus, MatchStatus
 from utils import embeds
 
 logger = logging.getLogger(__name__)
-
-# Reaction emojis for confirmation flow
-CONFIRM_EMOJI = "✅"
-REJECT_EMOJI = "❌"
 
 
 class ResultsCog(commands.Cog):
@@ -465,78 +460,7 @@ class ResultsCog(commands.Cog):
             send_reply=interaction.followup.send,
         )
 
-    @app_commands.command(
-        name="submit_result_2v2",
-        description="Submit match screenshots for 2v2 (or multi-player) matches.",
-    )
-    @app_commands.describe(
-        teammate="Your teammate (same team as you)",
-        opponent1="First opponent (other team)",
-        opponent2="Second opponent (other team)",
-        screenshot1="First match screenshot",
-        screenshot2="Second match screenshot (optional)",
-        screenshot3="Third match screenshot (optional)",
-        screenshot4="Fourth match screenshot (optional)",
-        screenshot5="Fifth match screenshot (optional)",
-        screenshot6="Sixth match screenshot (optional)",
-        screenshot7="Seventh match screenshot (optional)",
-        screenshot8="Eighth match screenshot (optional)",
-    )
-    async def submit_result_2v2(
-        self,
-        interaction: discord.Interaction,
-        opponent1: discord.Member,
-        screenshot1: discord.Attachment,
-        teammate: Optional[discord.Member] = None,
-        opponent2: Optional[discord.Member] = None,
-        screenshot2: Optional[discord.Attachment] = None,
-        screenshot3: Optional[discord.Attachment] = None,
-        screenshot4: Optional[discord.Attachment] = None,
-        screenshot5: Optional[discord.Attachment] = None,
-        screenshot6: Optional[discord.Attachment] = None,
-        screenshot7: Optional[discord.Attachment] = None,
-        screenshot8: Optional[discord.Attachment] = None,
-    ) -> None:
-        """Submit match results via slash command for team (2v2, 3v3, etc.) matches."""
-        if not interaction.guild:
-            await interaction.response.send_message(
-                embed=embeds.error_embed("This command can only be used in a server."),
-                ephemeral=True,
-            )
-            return
 
-        await interaction.response.defer(thinking=True)
-
-        author_member = (
-            interaction.user if isinstance(interaction.user, discord.Member)
-            else interaction.guild.get_member(interaction.user.id)
-        )
-        if not author_member:
-            author_member = interaction.user
-
-        players: list[discord.Member] = [author_member]
-        if teammate:
-            players.append(teammate)
-        if opponent1:
-            players.append(opponent1)
-        if opponent2:
-            players.append(opponent2)
-
-        attachments = [
-            att for att in [
-                screenshot1, screenshot2, screenshot3, screenshot4,
-                screenshot5, screenshot6, screenshot7, screenshot8
-            ] if att is not None
-        ]
-
-        await self._handle_submission(
-            guild=interaction.guild,
-            channel=interaction.channel,
-            author=author_member,
-            players=players,
-            image_attachments=attachments,
-            send_reply=interaction.followup.send,
-        )
 
 
 async def setup(bot: "TournamentBot") -> None:
