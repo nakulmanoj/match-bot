@@ -227,88 +227,7 @@ class ResultsCog(commands.Cog):
         home_players = await self.bot.db.get_players(match.home_team_id)
         away_players = await self.bot.db.get_players(match.away_team_id)
 
-        # Match OCR names to players for each screenshot
-        all_match_scores: list[float] = []
-        for i, ocr_res in enumerate(ocr_results):
-            try:
-                _hp, _ap, h_score, a_score = match_players_in_match(
-                    ocr_res.left_name, ocr_res.right_name, home_players, away_players
-                )
-                all_match_scores.extend([h_score, a_score])
-            except Exception:
-                logger.exception("Player matching failed for match %s leg %d", match.id, i + 1)
-                await send_reply(
-                    embed=embeds.error_embed(
-                        "Failed to match OCR names to registered players. "
-                        "Please use `/manual_result` instead."
-                    )
-                )
-                return
-
-        # Check confidence (fuzzy match scores 0-100 and OCR confidence 0-1)
-        min_match_score = min(all_match_scores) if all_match_scores else 0.0
-        min_ocr_conf = min(res.confidence for res in ocr_results) * 100.0
-
-        needs_confirmation = (
-            min_match_score < config.FUZZY_MATCH_THRESHOLD
-            or min_ocr_conf < config.OCR_CONFIDENCE_THRESHOLD
-        )
-
-        if needs_confirmation:
-            # Post OCR preview and ask for confirmation
-            preview_embed = discord.Embed(
-                title=f"🔍 OCR Result Preview ({len(ocr_results)} Screenshot{'s' if len(ocr_results) > 1 else ''}) — Needs Confirmation",
-                description="Please verify if the extracted details are correct.",
-                color=discord.Color.orange(),
-            )
-            for i, res in enumerate(ocr_results, start=1):
-                preview_embed.add_field(
-                    name=f"Game / Leg {i}",
-                    value=f"Left: **{res.left_name}** ({res.left_score}) - ({res.right_score}) **{res.right_name}**",
-                    inline=False,
-                )
-            preview_embed.set_footer(
-                text=f"Match Score: {min_match_score:.0f}% | OCR: {min_ocr_conf:.0f}% — "
-                f"React {CONFIRM_EMOJI} to accept or {REJECT_EMOJI} to reject."
-            )
-
-            preview_msg = await send_reply(embed=preview_embed)
-            try:
-                await preview_msg.add_reaction(CONFIRM_EMOJI)
-                await preview_msg.add_reaction(REJECT_EMOJI)
-            except Exception:
-                pass
-
-            def reaction_check(
-                reaction: discord.Reaction, user: discord.User
-            ) -> bool:
-                return (
-                    user.id == author.id
-                    and reaction.message.id == preview_msg.id
-                    and str(reaction.emoji) in (CONFIRM_EMOJI, REJECT_EMOJI)
-                )
-
-            try:
-                reaction, _ = await self.bot.wait_for(
-                    "reaction_add", check=reaction_check, timeout=60.0
-                )
-            except asyncio.TimeoutError:
-                await preview_msg.reply(
-                    embed=embeds.error_embed(
-                        "Confirmation timed out. Please re-submit or use `/manual_result`."
-                    )
-                )
-                return
-
-            if str(reaction.emoji) == REJECT_EMOJI:
-                await preview_msg.reply(
-                    embed=embeds.error_embed(
-                        "Result rejected. Please re-submit with clearer screenshots or use `/manual_result`."
-                    )
-                )
-                return
-
-        # Determine home/away scores for each screenshot
+        # Determine home/away scores for each screenshot directly using fuzzy matching
         from rapidfuzz import fuzz
         from ocr.matcher import _normalize_name
 
@@ -320,7 +239,13 @@ class ResultsCog(commands.Cog):
         def get_leg_scores(ocr_res):
             score_left_to_home = max([_calc_similarity(ocr_res.left_name, p.ign) for p in home_players], default=0.0)
             score_left_to_away = max([_calc_similarity(ocr_res.left_name, p.ign) for p in away_players], default=0.0)
-            if score_left_to_home >= score_left_to_away:
+            score_right_to_home = max([_calc_similarity(ocr_res.right_name, p.ign) for p in home_players], default=0.0)
+            score_right_to_away = max([_calc_similarity(ocr_res.right_name, p.ign) for p in away_players], default=0.0)
+
+            direct_score = score_left_to_home + score_right_to_away
+            swapped_score = score_left_to_away + score_right_to_home
+
+            if direct_score >= swapped_score:
                 return ocr_res.left_score, ocr_res.right_score
             else:
                 return ocr_res.right_score, ocr_res.left_score
