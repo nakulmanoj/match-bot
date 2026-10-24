@@ -113,6 +113,15 @@ class TournamentBot(commands.Bot):
         except Exception as e:
             log.warning(f"Could not start health check web server on port {port}: {e}")
 
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Log all incoming interactions for debugging."""
+        cmd_name = interaction.command.name if interaction.command else (interaction.data or {}).get("name", "unknown")
+        log.info(
+            f"[Interaction] Received command='{cmd_name}' type={interaction.type} "
+            f"from {interaction.user} (ID: {interaction.user.id}) in guild '{interaction.guild}'"
+        )
+        await super().on_interaction(interaction)
+
     async def on_ready(self) -> None:
         log.info(f"Bot is ready! Logged in as {self.user} (ID: {self.user.id})")  # type: ignore[union-attr]
         log.info(f"Connected to {len(self.guilds)} guild(s)")
