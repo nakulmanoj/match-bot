@@ -79,40 +79,78 @@ def bracket_embed(
         color=discord.Color.gold(),
     )
 
-    for match in matches_list:
-        home = teams_map.get(match.home_team_id)
-        away = teams_map.get(match.away_team_id)
-        home_name = home.name if home else "TBD"
-        away_name = away.name if away else "TBD"
+    # If round has > 20 matches (e.g. Round of 64 has 32 matches), group them
+    # so we never exceed Discord's strict 25-field limit per embed.
+    chunk_size = 1
+    if len(matches_list) > 40:
+        chunk_size = 3
+    elif len(matches_list) > 20:
+        chunk_size = 2
 
-        match_legs = legs_map.get(match.id, [])
+    for i in range(0, len(matches_list), chunk_size):
+        chunk = matches_list[i : i + chunk_size]
+        if len(chunk) == 1:
+            match = chunk[0]
+            home = teams_map.get(match.home_team_id)
+            away = teams_map.get(match.away_team_id)
+            home_name = home.name if home else "TBD"
+            away_name = away.name if away else "TBD"
 
-        if match.status.value == "completed":
-            leg_scores = []
-            for leg in match_legs:
-                if leg.home_score is not None and leg.away_score is not None:
-                    leg_scores.append(f"{leg.home_score}-{leg.away_score}")
-            score_str = " / ".join(leg_scores) if leg_scores else "N/A"
+            match_legs = legs_map.get(match.id, [])
 
-            agg_home = sum(l.home_score for l in match_legs if l.home_score is not None)
-            agg_away = sum(l.away_score for l in match_legs if l.away_score is not None)
+            if match.status.value == "completed":
+                leg_scores = []
+                for leg in match_legs:
+                    if leg.home_score is not None and leg.away_score is not None:
+                        leg_scores.append(f"{leg.home_score}-{leg.away_score}")
+                score_str = " / ".join(leg_scores) if leg_scores else "N/A"
 
-            winner_marker = ""
-            if match.winner_team_id == match.home_team_id:
-                winner_marker = f" ✅ **{home_name}** advances"
-            elif match.winner_team_id == match.away_team_id:
-                winner_marker = f" ✅ **{away_name}** advances"
+                agg_home = sum(l.home_score for l in match_legs if l.home_score is not None)
+                agg_away = sum(l.away_score for l in match_legs if l.away_score is not None)
 
-            value = f"**{home_name}** vs **{away_name}**\nLegs: {score_str} (Agg: {agg_home}-{agg_away}){winner_marker}"
+                winner_marker = ""
+                if match.winner_team_id == match.home_team_id:
+                    winner_marker = f" ✅ **{home_name}** advances"
+                elif match.winner_team_id == match.away_team_id:
+                    winner_marker = f" ✅ **{away_name}** advances"
+
+                value = f"**{home_name}** vs **{away_name}**\nLegs: {score_str} (Agg: {agg_home}-{agg_away}){winner_marker}"
+            else:
+                status_icon = "⏳" if match.status.value == "pending" else "🔴"
+                value = f"**{home_name}** vs **{away_name}** {status_icon}"
+
+            embed.add_field(
+                name=f"Match #{match.match_number}  •  Match ID: {match.id}",
+                value=value,
+                inline=False,
+            )
         else:
-            status_icon = "⏳" if match.status.value == "pending" else "🔴"
-            value = f"**{home_name}** vs **{away_name}** {status_icon}"
+            first_num = chunk[0].match_number
+            last_num = chunk[-1].match_number
+            field_name = f"Matches #{first_num}–#{last_num}"
+            lines = []
+            for match in chunk:
+                home = teams_map.get(match.home_team_id)
+                away = teams_map.get(match.away_team_id)
+                home_name = home.name if home else "TBD"
+                away_name = away.name if away else "TBD"
 
-        embed.add_field(
-            name=f"Match #{match.match_number}  •  Match ID: {match.id}",
-            value=value,
-            inline=False,
-        )
+                match_legs = legs_map.get(match.id, [])
+
+                if match.status.value == "completed":
+                    agg_home = sum(l.home_score for l in match_legs if l.home_score is not None)
+                    agg_away = sum(l.away_score for l in match_legs if l.away_score is not None)
+                    winner_marker = ""
+                    if match.winner_team_id == match.home_team_id:
+                        winner_marker = f" ✅ **{home_name}**"
+                    elif match.winner_team_id == match.away_team_id:
+                        winner_marker = f" ✅ **{away_name}**"
+                    lines.append(f"**#{match.match_number}** (ID: {match.id}): **{home_name}** {agg_home}-{agg_away} **{away_name}**{winner_marker}")
+                else:
+                    status_icon = "⏳" if match.status.value == "pending" else "🔴"
+                    lines.append(f"**#{match.match_number}** (ID: {match.id}): **{home_name}** vs **{away_name}** {status_icon}")
+
+            embed.add_field(name=field_name, value="\n".join(lines), inline=False)
 
     return embed
 

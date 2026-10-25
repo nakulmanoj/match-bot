@@ -69,16 +69,17 @@ def render_bracket_image(
     card_width = 240
     card_height = 80
     col_gap = 120
-    row_gap = 40
+    row_gap = 40 if max_matches_in_col <= 16 else 24
 
     total_content_height = max_matches_in_col * (card_height + row_gap)
     canvas_height = max(total_content_height + 160, 420)
     canvas_width = max(num_rounds * (card_width + col_gap) + 80, 800)
 
-    # Set up matplotlib figure (100 dpi scale)
+    # Set up matplotlib figure (scale dpi so large 64-team brackets stay fast and under Discord file limit)
+    dpi_val = 120 if max_matches_in_col <= 16 else 90
     fig_w = canvas_width / 100
     fig_h = canvas_height / 100
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=BG_COLOR, dpi=120)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=BG_COLOR, dpi=dpi_val)
     ax.set_facecolor(BG_COLOR)
     ax.set_xlim(0, canvas_width)
     ax.set_ylim(0, canvas_height)

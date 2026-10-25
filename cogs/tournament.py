@@ -236,8 +236,6 @@ class TournamentCog(commands.Cog):
                 f"{player_count}/{tournament.team_size} players"
             )
 
-        team_list = "\n".join(team_summaries) if team_summaries else "No teams."
-
         embed = discord.Embed(
             title=f"🏆 {tournament.name}",
             color=discord.Color.gold(),
@@ -251,7 +249,19 @@ class TournamentCog(commands.Cog):
             embed.add_field(
                 name="Format", value=tournament.format.value, inline=True
             )
-        embed.add_field(name="Registered Teams", value=team_list, inline=False)
+
+        if not team_summaries:
+            embed.add_field(name="Registered Teams", value="No teams.", inline=False)
+        elif len(team_summaries) <= 16:
+            embed.add_field(name="Registered Teams", value="\n".join(team_summaries), inline=False)
+        else:
+            # Chunk teams into fields of 16 so we never exceed Discord's 1024-character field limit
+            chunk_size = 16
+            for i in range(0, len(team_summaries), chunk_size):
+                chunk = team_summaries[i : i + chunk_size]
+                field_title = f"Registered Teams ({i + 1}–{min(i + chunk_size, len(team_summaries))})"
+                embed.add_field(name=field_title, value="\n".join(chunk), inline=False)
+
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(
