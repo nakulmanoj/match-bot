@@ -120,7 +120,6 @@ class TournamentBot(commands.Bot):
             f"[Interaction] Received command='{cmd_name}' type={interaction.type} "
             f"from {interaction.user} (ID: {interaction.user.id}) in guild '{interaction.guild}'"
         )
-        await super().on_interaction(interaction)
 
     async def on_ready(self) -> None:
         log.info(f"Bot is ready! Logged in as {self.user} (ID: {self.user.id})")  # type: ignore[union-attr]
