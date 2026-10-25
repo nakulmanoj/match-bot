@@ -489,6 +489,48 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
+    # ------------------------------------------------------------------
+    # Results Channel Restrictions
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="set_results_channel",
+        description="Restrict match result submissions (@p1 vs @p2 & /submit_result) to a specific channel.",
+    )
+    @app_commands.describe(channel="The designated channel for submitting match results")
+    @is_admin()
+    async def set_results_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Set the designated results channel for this server."""
+        guild_id = str(interaction.guild_id)
+        await self.bot.db.set_results_channel(guild_id, str(channel.id))
+        await interaction.response.send_message(
+            embed=embeds.success_embed(
+                title="Results Channel Set",
+                description=f"Match result submissions are now restricted to {channel.mention}.\n"
+                            f"Messages sent in other channels will be redirected here.",
+            )
+        )
+
+    @app_commands.command(
+        name="clear_results_channel",
+        description="Remove channel restrictions and allow match result submissions in any channel.",
+    )
+    @is_admin()
+    async def clear_results_channel(self, interaction: discord.Interaction) -> None:
+        """Remove the channel restriction for match results."""
+        guild_id = str(interaction.guild_id)
+        await self.bot.db.set_results_channel(guild_id, None)
+        await interaction.response.send_message(
+            embed=embeds.success_embed(
+                title="Results Channel Cleared",
+                description="Match results can now be submitted in any channel where the bot has access.",
+            )
+        )
+
 
 async def setup(bot: "TournamentBot") -> None:
     """Register the AdminCog with the bot."""

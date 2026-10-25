@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS admins (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(guild_id, discord_id)
 );
+CREATE TABLE IF NOT EXISTS guild_settings (
+    guild_id TEXT PRIMARY KEY,
+    results_channel_id TEXT
+);
 """
 
 
@@ -588,5 +592,28 @@ class Database:
         ) as cursor:
             rows = await cursor.fetchall()
             return [r["discord_id"] for r in rows]
+
+    # ── Guild Settings ─────────────────────────────────────────
+
+    async def set_results_channel(self, guild_id: str | int, channel_id: Optional[str | int]) -> None:
+        """Set or clear the designated results channel for a guild."""
+        g_id = str(guild_id)
+        c_id = str(channel_id) if channel_id is not None else None
+        query = """
+        INSERT INTO guild_settings (guild_id, results_channel_id)
+        VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET results_channel_id = excluded.results_channel_id;
+        """
+        await self.conn.execute(query, (g_id, c_id))
+        await self.conn.commit()
+
+    async def get_results_channel(self, guild_id: str | int) -> Optional[str]:
+        """Get the designated results channel ID for a guild, if configured."""
+        g_id = str(guild_id)
+        query = "SELECT results_channel_id FROM guild_settings WHERE guild_id = ?;"
+        async with self.conn.execute(query, (g_id,)) as cursor:
+            row = await cursor.fetchone()
+            return str(row["results_channel_id"]) if row and row["results_channel_id"] else None
+
 
 

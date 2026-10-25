@@ -362,6 +362,23 @@ class ResultsCog(commands.Cog):
         if not has_vs or not has_images:
             return
 
+        # Check if guild has a designated results channel
+        results_channel_id = await self.bot.db.get_results_channel(message.guild.id)
+        if results_channel_id and str(message.channel.id) != str(results_channel_id):
+            logger.info(
+                f"[Results] Ignored submission in #{message.channel} — restricted to ID {results_channel_id}"
+            )
+            try:
+                await message.reply(
+                    embed=embeds.error_embed(
+                        f"⚠️ Match results can only be submitted in <#{results_channel_id}>!"
+                    ),
+                    delete_after=15,
+                )
+            except Exception:
+                pass
+            return
+
         # Resolve mentions: support user mentions, role mentions, or single opponent tag
         mentions_list: list[discord.Member] = list(message.mentions)
         for role in message.role_mentions:
@@ -431,6 +448,17 @@ class ResultsCog(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message(
                 embed=embeds.error_embed("This command can only be used in a server."),
+                ephemeral=True,
+            )
+            return
+
+        # Check if guild has a designated results channel
+        results_channel_id = await self.bot.db.get_results_channel(interaction.guild.id)
+        if results_channel_id and str(interaction.channel_id) != str(results_channel_id):
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    f"⚠️ Match results can only be submitted in <#{results_channel_id}>!"
+                ),
                 ephemeral=True,
             )
             return
