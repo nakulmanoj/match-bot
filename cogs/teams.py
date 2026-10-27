@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.models import TournamentStatus
-from utils.permissions import is_admin
+from utils.permissions import is_admin, check_is_admin
 from utils import embeds
 
 
@@ -19,12 +19,12 @@ class TeamsCog(commands.Cog):
 
     @app_commands.command(
         name="add_member",
-        description="Add a player to a team.",
+        description="Add a player to a team (or substitute in an ongoing tournament).",
     )
     @app_commands.describe(
         player="The Discord member to add",
         ign="The player's in-game name",
-        team_name="The team name (defaults to player's name if omitted)",
+        team_name="The team name (required if tournament is in progress)",
     )
     async def add_member(
         self,
@@ -35,8 +35,7 @@ class TeamsCog(commands.Cog):
     ) -> None:
         """Add a Discord member to a team by team name.
 
-        Validates the tournament is in SETUP, the team isn't full,
-        and the player isn't already registered.
+        Works both in SETUP and IN_PROGRESS phases.
         """
         guild_id = interaction.guild_id
 
@@ -48,14 +47,25 @@ class TeamsCog(commands.Cog):
             )
             return
 
-        if tournament.status != TournamentStatus.SETUP:
+        if tournament.status not in (TournamentStatus.SETUP, TournamentStatus.IN_PROGRESS):
             await interaction.response.send_message(
                 embed=embeds.error_embed(
-                    "Players can only be added during the **Setup** phase."
+                    f"Tournament is currently in **{tournament.status.value}** status and not accepting new players."
                 ),
                 ephemeral=True,
             )
             return
+
+        # If tournament is IN_PROGRESS, only tournament admins can make roster adjustments
+        if tournament.status == TournamentStatus.IN_PROGRESS:
+            if not await check_is_admin(interaction):
+                await interaction.response.send_message(
+                    embed=embeds.error_embed(
+                        "Only tournament admins can add or substitute players while a tournament is in progress."
+                    ),
+                    ephemeral=True,
+                )
+                return
 
         # Check if player is already registered anywhere in this tournament
         existing_player = await self.bot.db.get_player_by_discord_id(
@@ -70,9 +80,99 @@ class TeamsCog(commands.Cog):
             )
             return
 
-        resolved_team_name = team_name.strip() if team_name and team_name.strip() else player.display_name
+        all_teams = await self.bot.db.get_teams(tournament.id)
+        target_team = None
 
-        # Look up if team already exists
+        if tournament.status == TournamentStatus.IN_PROGRESS:
+            # When in progress, bracket is fixed. Player must join an EXISTING team with an open spot.
+            if team_name and team_name.strip():
+                query = team_name.strip().lower()
+                for t in all_teams:
+                    if t.name.lower() == query or t.name.lower().replace(" (vacant)", "") == query:
+                        target_team = t
+                        break
+                    # Also allow searching by seed number e.g. "3" or "team 3"
+                    if query in (str(t.seed), f"team {t.seed}"):
+                        target_team = t
+                        break
+            else:
+                # If team_name omitted, check if there is an under-filled or vacant team
+                vacant_teams = []
+                for t in all_teams:
+                    cnt = await self.bot.db.get_player_count(t.id)
+                    if cnt < tournament.team_size:
+                        vacant_teams.append(t)
+
+                if len(vacant_teams) == 1:
+                    target_team = vacant_teams[0]
+                elif len(vacant_teams) == 0:
+                    await interaction.response.send_message(
+                        embed=embeds.error_embed(
+                            "All teams are currently full! Use `/remove_member` or `/replace_member` first."
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+                else:
+                    vacant_names = ", ".join(f"`{t.name}`" for t in vacant_teams)
+                    await interaction.response.send_message(
+                        embed=embeds.error_embed(
+                            f"Multiple teams have open spots: {vacant_names}.\n"
+                            f"Please specify `team_name` when using `/add_member`."
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+
+            if not target_team:
+                await interaction.response.send_message(
+                    embed=embeds.error_embed(
+                        f"Could not find an existing team matching **{team_name}**.\n"
+                        f"Use `/tournament_info` or `/view_bracket` to check current team names."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            player_count = await self.bot.db.get_player_count(target_team.id)
+            if player_count >= tournament.team_size:
+                await interaction.response.send_message(
+                    embed=embeds.error_embed(
+                        f"**{target_team.name}** is already full ({player_count}/{tournament.team_size})."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            # Add the player
+            await self.bot.db.add_player(target_team.id, str(player.id), ign.strip())
+
+            # Update team name if 1v1 or if marked (Vacant)
+            if tournament.team_size == 1:
+                await self.bot.db.update_team_name(target_team.id, player.display_name)
+                display_team_name = player.display_name
+            else:
+                if target_team.name.endswith(" (Vacant)"):
+                    cleaned = target_team.name.replace(" (Vacant)", "")
+                    await self.bot.db.update_team_name(target_team.id, cleaned)
+                    display_team_name = cleaned
+                else:
+                    display_team_name = target_team.name
+
+            await interaction.response.send_message(
+                embed=embeds.success_embed(
+                    title="✅ Player Added to Ongoing Tournament",
+                    description=(
+                        f"{player.mention} (IGN: **{ign.strip()}**) has joined "
+                        f"**{display_team_name}**.\n\n"
+                        f"Bracket fixtures, `/submit_result`, `@mentions`, and OCR will now recognize {player.mention} everywhere."
+                    ),
+                )
+            )
+            return
+
+        # Setup phase:
+        resolved_team_name = team_name.strip() if team_name and team_name.strip() else player.display_name
         target_team = await self.bot.db.get_team_by_name(tournament.id, resolved_team_name)
 
         if target_team:
@@ -88,7 +188,6 @@ class TeamsCog(commands.Cog):
                 return
         else:
             # Check tournament capacity
-            all_teams = await self.bot.db.get_teams(tournament.id)
             if len(all_teams) >= tournament.num_teams:
                 await interaction.response.send_message(
                     embed=embeds.error_embed(
@@ -138,11 +237,12 @@ class TeamsCog(commands.Cog):
                 embed=embeds.error_embed("No active tournament found."),
                 ephemeral=True,
             )
-        if tournament.status != TournamentStatus.SETUP:
+            return
+
+        if tournament.status not in (TournamentStatus.SETUP, TournamentStatus.IN_PROGRESS):
             await interaction.response.send_message(
                 embed=embeds.error_embed(
-                    "Players can only be removed during the **Setup** phase. "
-                    "Use `/force_winner` to disqualify or award walkovers once in progress."
+                    f"Tournament is in **{tournament.status.value}** status and not accepting changes."
                 ),
                 ephemeral=True,
             )
@@ -161,17 +261,136 @@ class TeamsCog(commands.Cog):
             return
 
         team_id = existing_player.team_id
+        team = await self.bot.db.get_team(team_id)
+        team_name = team.name if team else "Team"
+
         await self.bot.db.remove_player(existing_player.id)
 
-        # If team is now empty, delete team slot
+        # Check remaining players
         remaining = await self.bot.db.get_players(team_id)
-        if not remaining:
-            await self.bot.db.delete_team(team_id)
+
+        if tournament.status == TournamentStatus.SETUP:
+            # In setup phase, empty teams are cleaned up
+            if not remaining:
+                await self.bot.db.delete_team(team_id)
+            desc = f"{player.mention} has been removed from **{team_name}**."
+        else:
+            # In progress phase, NEVER delete team slot (needed for bracket fixtures)
+            if tournament.team_size == 1:
+                vacant_name = f"Team {team.seed} (Vacant)" if team else "Vacant"
+                await self.bot.db.update_team_name(team_id, vacant_name)
+            elif not remaining and team:
+                if not team.name.endswith(" (Vacant)"):
+                    await self.bot.db.update_team_name(team_id, f"{team.name} (Vacant)")
+
+            desc = (
+                f"{player.mention} has been removed from **{team_name}**.\n\n"
+                f"*(Tournament is in progress. The team slot remains in the bracket. "
+                f"You can add a replacement using `/add_member` or `/replace_member`.)*"
+            )
 
         await interaction.response.send_message(
             embed=embeds.success_embed(
                 title="🗑️ Player Removed",
-                description=f"{player.mention} has been removed from the tournament.",
+                description=desc,
+            )
+        )
+
+    @app_commands.command(
+        name="replace_member",
+        description="Substitute a player in the tournament with a new player.",
+    )
+    @app_commands.describe(
+        old_player="The registered member being replaced",
+        new_player="The new Discord member joining the team",
+        new_ign="The in-game name of the new player",
+    )
+    @is_admin()
+    async def replace_member(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+        new_ign: str,
+    ) -> None:
+        """Atomically substitute a player with a new player."""
+        guild_id = interaction.guild_id
+
+        tournament = await self.bot.db.get_active_tournament(guild_id)
+        if not tournament:
+            await interaction.response.send_message(
+                embed=embeds.error_embed("No active tournament found."),
+                ephemeral=True,
+            )
+            return
+
+        if tournament.status not in (TournamentStatus.SETUP, TournamentStatus.IN_PROGRESS):
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    f"Tournament is in **{tournament.status.value}** status and not accepting changes."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Check old player
+        existing_old = await self.bot.db.get_player_by_discord_id(
+            tournament.id, str(old_player.id)
+        )
+        if not existing_old:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    f"{old_player.mention} is not registered in this tournament."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Check new player not already registered
+        existing_new = await self.bot.db.get_player_by_discord_id(
+            tournament.id, str(new_player.id)
+        )
+        if existing_new:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    f"{new_player.mention} is already registered in this tournament."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        team = await self.bot.db.get_team(existing_old.team_id)
+        if not team:
+            await interaction.response.send_message(
+                embed=embeds.error_embed("Team not found."),
+                ephemeral=True,
+            )
+            return
+
+        # Replace player
+        await self.bot.db.remove_player(existing_old.id)
+        await self.bot.db.add_player(team.id, str(new_player.id), new_ign.strip())
+
+        # Update team name if 1v1
+        if tournament.team_size == 1:
+            await self.bot.db.update_team_name(team.id, new_player.display_name)
+            display_name = new_player.display_name
+        else:
+            if team.name.endswith(" (Vacant)"):
+                cleaned = team.name.replace(" (Vacant)", "")
+                await self.bot.db.update_team_name(team.id, cleaned)
+                display_name = cleaned
+            else:
+                display_name = team.name
+
+        await interaction.response.send_message(
+            embed=embeds.success_embed(
+                title="🔄 Player Substituted",
+                description=(
+                    f"{old_player.mention} has been replaced by {new_player.mention} "
+                    f"(IGN: **{new_ign.strip()}**) on **{display_name}**.\n\n"
+                    f"Bracket fixtures, `/submit_result`, `@mentions`, and OCR will now recognize {new_player.mention} everywhere."
+                ),
             )
         )
 
