@@ -15,7 +15,7 @@ from typing import Optional
 import aiohttp
 import easyocr
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 
 from core.models import OCRResult
 
@@ -136,6 +136,82 @@ class OCRExtractor:
         avg_conf = sum(r[2] for r in top_line) / len(top_line) if top_line else 0.0
         return joined, avg_conf
 
+    def _extract_score_sync(self, c_score: Image.Image) -> Optional[tuple[int, int]]:
+        """Extract home and away scores from the score crop.
+
+        FC Mobile displays: [Home Score]  [FC Logo]  [Away Score] with [90:00] below.
+        The triangular FC logo in the center is frequently misread by OCR as '7'
+        (producing erroneous scores like '71' or '7-0').
+        To prevent this, we mask out the center 18% where the FC logo and timer sit,
+        leaving strictly the left and right score digits.
+        """
+        sw, sh = c_score.size
+
+        # 1. Mask out the center column where the FC logo & match timer reside
+        masked = c_score.copy()
+        draw = ImageDraw.Draw(masked)
+        x_center_min = int(sw * 0.40)
+        x_center_max = int(sw * 0.60)
+        draw.rectangle([x_center_min, 0, x_center_max, sh], fill=(0, 0, 0))
+
+        # Try raw masked crop first, then 2x upscaled
+        variants = [masked, masked.resize((sw * 2, sh * 2), Image.LANCZOS)]
+        for img in variants:
+            results = self.reader.readtext(np.array(img))  # type: ignore[union-attr]
+            left_candidates: list[tuple[float, float, int]] = []
+            right_candidates: list[tuple[float, float, int]] = []
+            img_w = img.width
+
+            for bbox, text, conf in results:
+                text_clean = text.strip()
+                # Normalize common OCR letter confusions for digits (O/o -> 0, I/l/| -> 1)
+                text_norm = (
+                    text_clean.replace("O", "0")
+                    .replace("o", "0")
+                    .replace("I", "1")
+                    .replace("l", "1")
+                    .replace("|", "1")
+                )
+
+                found = re.findall(r"\d+", text_norm)
+                if not found:
+                    continue
+
+                xs = [p[0] for p in bbox]
+                ys = [p[1] for p in bbox]
+                cx = sum(xs) / len(xs)
+                height = max(ys) - min(ys)
+
+                for d in found:
+                    val = int(d)
+                    # Filter out impossible scores (e.g. 71 or 90 from clock)
+                    if val > 20:
+                        # If a stray FC logo '7' fused with a digit (e.g. '71' -> 1, '70' -> 0)
+                        if str(val).startswith("7") and len(str(val)) == 2:
+                            val = int(str(val)[1:])
+                        else:
+                            continue
+
+                    if cx < (img_w * 0.50):
+                        left_candidates.append((height, conf, val))
+                    else:
+                        right_candidates.append((height, conf, val))
+
+            if left_candidates and right_candidates:
+                left_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                right_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                return left_candidates[0][2], right_candidates[0][2]
+
+        # 2. Fallback: unmasked parsing if masking didn't find both digits
+        raw_res = self.reader.readtext(np.array(c_score))  # type: ignore[union-attr]
+        parsed = self._parse_score_from_results(raw_res)
+        if parsed is None:
+            proc_score = self._preprocess(c_score, scale=2, contrast=2.0)
+            res_proc = self.reader.readtext(np.array(proc_score))  # type: ignore[union-attr]
+            parsed = self._parse_score_from_results(res_proc)
+
+        return parsed
+
     @staticmethod
     def _parse_score_from_results(results_list: list[tuple]) -> Optional[tuple[int, int]]:
         """Parse match score from EasyOCR detection list.
@@ -143,6 +219,12 @@ class OCRExtractor:
         Handles both combined score boxes ('1 - 2', '1 2') and separated
         score boxes where EasyOCR detects left and right scores as distinct boxes.
         """
+        def _sanitize_val(val: int) -> int:
+            """Clean numbers where FC logo '7' fused into digit (e.g. 71 -> 1, 70 -> 0)."""
+            if val > 20 and str(val).startswith("7") and len(str(val)) == 2:
+                return int(str(val)[1:])
+            return val
+
         # 1. First attempt: check for combined score inside a single text box
         for _bbox, text, _conf in results_list:
             text_clean = text.strip()
@@ -153,12 +235,16 @@ class OCRExtractor:
             # Standard '2 - 1', '2-0', '2 " 1', '2 : 1'
             m = re.search(r"(\d+)\s*[-–—:\"]\s*(\d+)", text_clean)
             if m:
-                return int(m.group(1)), int(m.group(2))
+                s1, s2 = _sanitize_val(int(m.group(1))), _sanitize_val(int(m.group(2)))
+                if s1 <= 20 and s2 <= 20:
+                    return s1, s2
 
             # Isolated digits in single string: e.g. '1 7 0' (1 vs 0), '0 0'
             digits = re.findall(r"\b\d+\b", text_clean)
             if len(digits) >= 2:
-                return int(digits[0]), int(digits[-1])
+                s1, s2 = _sanitize_val(int(digits[0])), _sanitize_val(int(digits[-1]))
+                if s1 <= 20 and s2 <= 20:
+                    return s1, s2
 
         # 2. Second attempt: left and right scores detected as separate bounding boxes
         # e.g. Box 1: '1 %' (left score=1), Box 2: '2' (right score=2)
@@ -175,7 +261,9 @@ class OCRExtractor:
                 cx = sum(xs) / len(xs)
                 height = max(ys) - min(ys)
                 for d in found:
-                    candidates.append((cx, height, int(d), float(conf)))
+                    val = _sanitize_val(int(d))
+                    if val <= 20:
+                        candidates.append((cx, height, val, float(conf)))
 
         if len(candidates) >= 2:
             # Sort left to right
@@ -229,21 +317,12 @@ class OCRExtractor:
 
         # 3. Score Extraction
         c_score = self._crop_region(image, score_box)
-        res_score = await loop.run_in_executor(
-            None, self._extract_text_sync, np.array(c_score)
+        parsed = await loop.run_in_executor(
+            None, self._extract_score_sync, c_score
         )
-        parsed = self._parse_score_from_results(res_score)
 
         if parsed is None:
-            # Try preprocessed score crop
-            proc_score = self._preprocess(c_score, scale=2, contrast=2.0)
-            res_score_proc = await loop.run_in_executor(
-                None, self._extract_text_sync, np.array(proc_score)
-            )
-            parsed = self._parse_score_from_results(res_score_proc)
-
-        if parsed is None:
-            log.warning("Failed to parse score from score box results: %s", res_score)
+            log.warning("Failed to parse score from score box")
             return None
 
         left_score, right_score = parsed
