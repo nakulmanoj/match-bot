@@ -139,78 +139,73 @@ class OCRExtractor:
     def _extract_score_sync(self, c_score: Image.Image) -> Optional[tuple[int, int]]:
         """Extract home and away scores from the score crop.
 
-        FC Mobile displays: [Home Score]  [FC Logo]  [Away Score] with [90:00] below.
-        The triangular FC logo in the center is frequently misread by OCR as '7'
-        (producing erroneous scores like '71' or '7-0').
-        To prevent this, we mask out the center 18% where the FC logo and timer sit,
-        leaving strictly the left and right score digits.
+        1. First inspect the raw unmasked score crop. When EasyOCR detects the score
+           line as a whole with context (e.g. '1 " 1', '5 " 1', '1 " 2', '2 " 0',
+           '3 " 1', '1 7 0', '3 7 1'), it recognizes digits with high fidelity.
+        2. If unmasked line detection doesn't yield two valid scores, fall back to
+           masked detection (where center FC logo is blanked) with strict confidence >= 0.25
+           to avoid stray low-confidence noise tokens (like misidentified '7' at conf 0.07).
         """
         sw, sh = c_score.size
 
-        # 1. Mask out the center column where the FC logo & match timer reside
+        # --- Phase 1: Unmasked contextual detection ---
+        raw_res = self.reader.readtext(np.array(c_score))  # type: ignore[union-attr]
+        for _bbox, text, conf in raw_res:
+            t = text.strip()
+            if ":" in t or conf < 0.20:
+                continue
+
+            # Standard formats: '2 - 1', '3 " 1', '1 " 1', '5 " 1'
+            m = re.search(r"(\d+)\s*[-–—:\"]\s*(\d+)", t)
+            if m:
+                s1, s2 = int(m.group(1)), int(m.group(2))
+                if s1 <= 20 and s2 <= 20:
+                    return s1, s2
+
+            # Space-separated: '1 7 0' (1 vs 0 with FC logo '7' in center), '3 7 1' (3 vs 1)
+            # or '1 0', '2 1', '1 1'
+            digits = re.findall(r"\d+", t)
+            if len(digits) == 3 and digits[1] == '7':
+                s1, s2 = int(digits[0]), int(digits[2])
+                if s1 <= 20 and s2 <= 20:
+                    return s1, s2
+            elif len(digits) == 2:
+                s1, s2 = int(digits[0]), int(digits[1])
+                if s1 <= 20 and s2 <= 20:
+                    return s1, s2
+
+        # --- Phase 2: Masked detection (when scores are in separate boxes) ---
         masked = c_score.copy()
         draw = ImageDraw.Draw(masked)
-        x_center_min = int(sw * 0.38)
-        x_center_max = int(sw * 0.62)
-        draw.rectangle([x_center_min, 0, x_center_max, sh], fill=(0, 0, 0))
+        draw.rectangle([int(sw * 0.38), 0, int(sw * 0.62), sh], fill=(0, 0, 0))
+        masked_2x = masked.resize((sw * 2, sh * 2), Image.LANCZOS)
 
-        # Try 2x upscaled masked crop first (optimal for thin digits like '1'), then raw masked
-        variants = [masked.resize((sw * 2, sh * 2), Image.LANCZOS), masked]
-        for img in variants:
-            results = self.reader.readtext(np.array(img))  # type: ignore[union-attr]
-            left_candidates: list[tuple[float, float, int]] = []
-            right_candidates: list[tuple[float, float, int]] = []
-            img_w = img.width
+        masked_res = self.reader.readtext(np.array(masked_2x))  # type: ignore[union-attr]
+        left_c: list[tuple[float, int]] = []
+        right_c: list[tuple[float, int]] = []
+        w_2x = masked_2x.width
 
-            for bbox, text, conf in results:
-                text_clean = text.strip()
-                # Normalize common OCR letter confusions for digits (O/o -> 0, I/l/| -> 1)
-                text_norm = (
-                    text_clean.replace("O", "0")
-                    .replace("o", "0")
-                    .replace("I", "1")
-                    .replace("l", "1")
-                    .replace("|", "1")
-                )
-
-                found = re.findall(r"\d+", text_norm)
-                if not found:
-                    continue
-
-                xs = [p[0] for p in bbox]
-                ys = [p[1] for p in bbox]
-                cx = sum(xs) / len(xs)
-                height = max(ys) - min(ys)
-
-                for d in found:
-                    val = int(d)
-                    # Filter out impossible scores (e.g. 71 or 90 from clock)
-                    if val > 20:
-                        # If a stray FC logo '7' fused with a digit (e.g. '71' -> 1, '70' -> 0)
-                        if str(val).startswith("7") and len(str(val)) == 2:
-                            val = int(str(val)[1:])
-                        else:
-                            continue
-
-                    if cx < (img_w * 0.50):
-                        left_candidates.append((height, conf, val))
+        for bbox, text, conf in masked_res:
+            t = text.strip().replace("O", "0").replace("o", "0")
+            digits = re.findall(r"\d+", t)
+            if digits and conf >= 0.25:  # Strict confidence prevents noise artifacts
+                cx = sum(p[0] for p in bbox) / len(bbox)
+                val = int(digits[0])
+                if val <= 20:
+                    if cx < (w_2x * 0.50):
+                        left_c.append((float(conf), val))
                     else:
-                        right_candidates.append((height, conf, val))
+                        right_c.append((float(conf), val))
 
-            if left_candidates and right_candidates:
-                left_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                right_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                return left_candidates[0][2], right_candidates[0][2]
+        if left_c and right_c:
+            left_c.sort(key=lambda c: c[0], reverse=True)
+            right_c.sort(key=lambda c: c[0], reverse=True)
+            return left_c[0][1], right_c[0][1]
 
-        # 2. Fallback: unmasked parsing if masking didn't find both digits
-        raw_res = self.reader.readtext(np.array(c_score))  # type: ignore[union-attr]
-        parsed = self._parse_score_from_results(raw_res)
-        if parsed is None:
-            proc_score = self._preprocess(c_score, scale=2, contrast=2.0)
-            res_proc = self.reader.readtext(np.array(proc_score))  # type: ignore[union-attr]
-            parsed = self._parse_score_from_results(res_proc)
-
-        return parsed
+        # --- Phase 3: Preprocessed fallback ---
+        proc_score = self._preprocess(c_score, scale=2, contrast=2.0)
+        res_proc = self.reader.readtext(np.array(proc_score))  # type: ignore[union-attr]
+        return self._parse_score_from_results(res_proc)
 
     @staticmethod
     def _parse_score_from_results(results_list: list[tuple]) -> Optional[tuple[int, int]]:
