@@ -150,12 +150,12 @@ class OCRExtractor:
         # 1. Mask out the center column where the FC logo & match timer reside
         masked = c_score.copy()
         draw = ImageDraw.Draw(masked)
-        x_center_min = int(sw * 0.40)
-        x_center_max = int(sw * 0.60)
+        x_center_min = int(sw * 0.38)
+        x_center_max = int(sw * 0.62)
         draw.rectangle([x_center_min, 0, x_center_max, sh], fill=(0, 0, 0))
 
-        # Try raw masked crop first, then 2x upscaled
-        variants = [masked, masked.resize((sw * 2, sh * 2), Image.LANCZOS)]
+        # Try 2x upscaled masked crop first (optimal for thin digits like '1'), then raw masked
+        variants = [masked.resize((sw * 2, sh * 2), Image.LANCZOS), masked]
         for img in variants:
             results = self.reader.readtext(np.array(img))  # type: ignore[union-attr]
             left_candidates: list[tuple[float, float, int]] = []
